@@ -673,7 +673,8 @@ Also format its value in the Transient menu."
         (gptel--suffix-send
          (cons "I" (transient-args transient-current-command)))
         'json)))]]
-  [(gptel--suffix-send)]
+  [(gptel--suffix-send)
+   ("q" "Suspend gptel-menu" transient-suspend)]
   (interactive)
   (gptel--sanitize-model)
   (transient-setup 'gptel-menu))
