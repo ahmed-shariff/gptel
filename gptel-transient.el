@@ -390,51 +390,21 @@ which see."
 (defvar gptel--tools-removed nil
   "Tools to be removed in gptel-tools prefix.")
 
-(defun gptel--tools-annotation-function (cand)
-  "Annotation function used in `gptel--completing-read-multiple-tools'"
-  (propertize
-   (get-text-property 0 'description cand)
-   'face 'shadow))
+(defvar gptel--tools-active-category nil)
 
-(defun gptel--completing-read-multiple-tools (prompt candidate-tools)
-  "completing-read-multiple with tools."
-  (let ((padded-candidate-len
-         (+ 3 (apply #'max (map-keys-apply #'length candidate-tools)))))
-    (cl-loop for selection in
-             ;; Without this, when duplicate values are selected in
-             ;; `completing-read-multiple', it will result in a circular-list error
-             (seq-uniq
-              (completing-read-multiple
-               prompt
-               (lambda (string pred action)
-                 (if (eq action 'metadata)
-                     '(metadata
-                       (annotation-function . gptel--tools-annotation-function)
-                       (category . gptel-tool))
-                   (complete-with-action
-                    action
-                    (cl-loop for (tool-name . tools) in candidate-tools
-                             collect
-                             (propertize
-                              (string-pad tool-name padded-candidate-len)
-                              'description
-                              (if (length= tools 1)
-                                  (gptel--describe-directive
-                                   (gptel-tool-description (car tools))
-                                   (- (window-width) 40))
-                                (concat
-                                 "category: ("
-                                 (string-join (mapcar
-                                               (lambda (tool)
-                                                 (gptel-tool-name tool))
-                                               tools)
-                                              ", ")
-                                 ")"))))
-                    string
-                    pred)))
-               nil t)
-              #'string-equal)
-             nconc (alist-get (string-trim-right selection) candidate-tools nil nil #'string-equal))))
+(defun gptel--tools-append-empty-infixes (infixes)
+  "Appends the infiex to make sure the prefix height doesn't change."
+  (append infixes
+          (let ((longest-list-length (+ 6 ;; Additional options
+                                        (apply #'max
+                                            (mapcar
+                                             (lambda (tools-alist)
+                                               (length (cdr tools-alist)))
+                                             gptel--known-tools))))
+                (infixes-length (length infixes)))
+            (when (> longest-list-length infixes-length)
+              (make-list (- longest-list-length infixes-length) "")))))
+
 
 ;; * Transient classes and methods for gptel
 
@@ -571,6 +541,13 @@ Also format its value in the Transient menu."
       (propertize
        (concat "(" (symbol-name (oref obj display-nil)) ")")
        'face 'transient-inactive-value))))
+
+(defclass gptel-tools-callback-switch (transient-suffix)
+  ((transient :initform t)
+   (value :initarg :value)
+   (format :initform "%k %d")
+   (formatter :initarg :formatter))
+  "A infix switch that triggers a callback")
 
 
 ;; * Transient Prefixes
@@ -839,20 +816,16 @@ only (\"oneshot\")."
                                                           str-list))
                                                   (concat cat " (" (string-join (reverse str-list) ", ") ")")))))))
     :pad-keys t]]
-  [
-   ["Update tools used"
-    (gptel--infix-set-tools)
-    (gptel--infix-remove-tools
-     :if (lambda () (or gptel--tools-added gptel-tools)))
-    (gptel--infix-clear-tools-changes
-     :if (lambda () (or gptel--tools-added gptel--tools-removed)))
-    (gptel--infix-remove-all-tools
-     :if (lambda () (or gptel--tools-added gptel-tools)))]]
   [[""
     (gptel--infix-variable-scope)
     (gptel--infix-use-tools)
     (gptel--infix-confirm-tool-calls)
     (gptel--infix-include-tool-results)]
+   [""
+    (gptel--infix-clear-tools-changes
+     :if (lambda () (or gptel--tools-added gptel--tools-removed)))
+    (gptel--infix-remove-all-tools
+     :if (lambda () (or gptel--tools-added gptel-tools)))]
    [""
     ("RET" "Confirm selection"
      (lambda (args)
@@ -864,14 +837,125 @@ only (\"oneshot\")."
                         #'equal)
         gptel--set-buffer-locally)
        (setq gptel--tools-added nil
-             gptel--tools-removed nil))
+             gptel--tools-removed nil
+             gptel--tools-active-category nil))
      :transient transient--do-return)
     ("q" "Cancel"
      (lambda (args)
        (interactive (list ""))
        (setq gptel--tools-added nil
-             gptel--tools-removed nil))
-     :transient nil)]])
+             gptel--tools-removed nil
+             gptel--tools-active-category nil))
+     :transient nil)]]
+  [:description
+   "Select tools"
+   ;; Allow selecting the category
+   [:class transient-column
+    :setup-children
+    (lambda (_)
+      (transient-parse-suffixes
+       'gptel-tools
+       (cl-loop          ;loop through gptel--known tools and collect categories
+        for (category . tools-alist) in gptel--known-tools
+        with unused-keys = (delete ?q (number-sequence ?a ?z))
+        for category-key = (seq-find (lambda (k) (member k unused-keys)) category
+                                     (seq-first unused-keys))
+        do (setq unused-keys (delete category-key unused-keys))
+        collect
+        (list 'gptel--tools-category-switch
+              :description (concat " " category)
+              :value category
+              :key (char-to-string category-key))
+        into infixes
+        finally return
+        (gptel--tools-append-empty-infixes infixes))))
+    :pad-keys t
+    :if (lambda () (not gptel--tools-active-category))]
+   ;; When category is selected, only show the names
+   [:class
+    transient-column
+    :setup-children
+    (lambda (_)
+      (transient-parse-suffixes
+       'gptel-tools
+       (cl-loop          ;loop through gptel--known tools and collect categories
+        for (category . tools-alist) in gptel--known-tools
+        collect
+        (list :info (propertize category
+                                'face (if (string= (car gptel--tools-active-category) category)
+                                          'transient-heading
+                                        'shadow)))
+        into infixes
+        finally return
+        (gptel--tools-append-empty-infixes infixes))))
+    :pad-keys t
+    :if (lambda () gptel--tools-active-category)]
+   ;; when category is selected, show the tools
+   [:class
+    transient-column
+    :setup-children
+    (lambda (_)
+      (transient-parse-suffixes
+       'gptel-tools
+       (pcase-let* ((`(,category . ,category-key) gptel--tools-active-category)
+                    (tools-alist (alist-get category gptel--known-tools))
+                    (category-tools (mapcar #'cdr tools-alist))
+                    (all-selected-tools (seq-difference
+                                         (append gptel-tools gptel--tools-added)
+                                         gptel--tools-removed
+                                         #'equal))
+                    (desc-length
+                     (- (window-width)
+                        (+ 20
+                           (apply #'max
+                                  (mapcar
+                                   (lambda (tools-alist)
+                                     (+ (length (car tools-alist))
+                                        (apply #'max
+                                               (mapcar (lambda (tool-spec)
+                                                         (length (car tool-spec)))
+                                                       (cdr tools-alist)))))
+                                   gptel--known-tools))))))
+         (cl-loop                    ;for each category, collect tools as infixes
+          for (name . tool) in tools-alist
+          with tool-keys = (delete category-key (nconc (number-sequence ?a ?z)
+                                                       (number-sequence ?0 ?9)))
+          for tool-key = (seq-find (lambda (k) (member k tool-keys)) name
+                                   (seq-first tool-keys))
+          do (setq tool-keys (delete tool-key tool-keys))
+          collect           ;Each list is a transient infix of type gptel--switch
+          (list 'gptel--tools-tool-switch
+                :description 
+                (concat
+                 (propertize (gptel-tool-name tool)
+                             'face (if (memql tool all-selected-tools)
+                                       'bold
+                                     'default))
+                 " "
+                 (propertize
+                  (concat "(" (gptel--describe-directive
+                               (gptel-tool-description tool) desc-length)
+                          ")")
+                  'face 'shadow))
+                :value tool
+                :key (char-to-string tool-key))
+          into infixes-for-category
+          finally return
+          (append
+           (list
+            (list 'gptel--tools-go-back)
+            (list 'gptel--tools-tool-select-all-switch
+                  :value category-tools)
+            (list 'gptel--tools-tool-deselect-all-switch
+                  :value category-tools)
+            (list 'gptel--tools-tool-clear-changes-all-switch
+                  :value category-tools)
+            "")
+           infixes-for-category)
+          ))))
+    :pad-keys t
+    :if (lambda () gptel--tools-active-category)]
+   ])
 
 
 ;; * Transient Infixes
@@ -1179,85 +1263,107 @@ Available behaviors are
                 (cdr (assoc destination choices))))))
 
 ;; ** Infixes for tool use
-(transient-define-infix gptel--infix-set-tools ()
-  "Set tools to use."
-  :description "Select tools"
-  :class 'transient-lisp-variable
-  :prompt "Select tools: "
-  :format " %k %d"
-  :argument "tools"
-  :variable 'gptel--tools-added
-  :key "tt"
-  :reader (lambda (prompt &rest _)
-            (let ((tools-added
-                   (gptel--completing-read-multiple-tools
-                    prompt
-                    (let ((all-tools-considered (append gptel-tools gptel--tools-added)))
-                      (cl-loop for (cat . tools-alist) in gptel--known-tools
-                               for filtered-tools-names = (cl-loop for tool in all-tools-considered
-                                                                   when (string-equal cat (gptel-tool-category tool))
-                                                                   collect (gptel-tool-name tool))
-                               for filtered-tools-alist = (cl-loop for (tool_name . tool) in tools-alist
-                                                                   unless (memq tool_name filtered-tools-names)
-                                                                   nconc
-                                                                   `(,(cons (concat cat "::" tool_name)
-                                                                            `(,tool))))
-                               if (length> filtered-tools-alist 0)
-                               nconc `(,(cons cat
-                                              (flatten-list (map-values filtered-tools-alist))))
-                               and nconc filtered-tools-alist)))))
-              (setq gptel--tools-removed
-                    (seq-difference gptel--tools-removed
-                                    tools-added
-                                    #'equal))
-              (seq-uniq (append gptel--tools-added tools-added) #'equal))))
+(transient-define-suffix gptel--tools-category-switch ()
+  "Switch for a category"
+  :class 'gptel-tools-callback-switch
+  (interactive)
+  (let ((obj (transient-suffix-object)))
+    (setf gptel--tools-active-category (cons (oref obj value)
+                                             (oref obj key)))))
 
-(transient-define-infix gptel--infix-remove-tools ()
-  "Remove tools being used."
-  :description "Remove tools"
-  :class 'transient-lisp-variable
-  :prompt "Remove tools: "
-  :format " %k %d"
-  :variable 'gptel--tools-removed
-  :key "tr"
-  :reader (lambda (prompt &rest _)
-            (let* ((tools-removed
-                    (gptel--completing-read-multiple-tools
-                     prompt
-                     (let ((category-candidates))
-                       (append
-                        (mapcar
-                         (lambda (tool)
-                           (let ((category (gptel-tool-category tool)))
-                             (push tool
-                                   (alist-get category category-candidates
-                                              nil nil #'string-equal))
-                             (list (concat category "::" (gptel-tool-name tool)) tool)))
-                         (append gptel-tools gptel--tools-added))
-                        category-candidates))))
-                   (intersecting-tools (seq-intersection gptel--tools-added tools-removed #'equal)))
-              (setq gptel--tools-added
-                    (seq-difference gptel--tools-added
-                                    intersecting-tools
-                                    #'equal))
-              (seq-difference
-               (seq-uniq (append gptel--tools-removed tools-removed) #'equal)
-               intersecting-tools
-               #'equal))))
+(transient-define-suffix gptel--tools-tool-switch ()
+  "Switch for a tool"
+  :class 'gptel-tools-callback-switch
+  (interactive)
+  (let ((value (oref (transient-suffix-object) value)))
+        ;; (all-added-tools (seq-difference
+        ;;                   (append gptel--tools-added gptel-tools)
+        ;;                   gptel--tools-removed
+        ;;                   #'equal)))
+    ;; (if (listp value)
+    ;;     (if (em (length< (cl-intersection all-added-tools value) (length value)))
+    ;;         (setq gptel--tools-added (seq-uniq
+    ;;                                   (append (seq-difference value gptel-tools #'equal)
+    ;;                                           gptel--tools-added)
+    ;;                                   #'equal)
+    ;;               gptel--tools-removed (seq-uniq
+    ;;                                     (seq-difference gptel--tools-removed value
+    ;;                                                     #'equal)
+    ;;                                     #'equal))
+    ;;       (setq gptel--tools-removed (seq-uniq
+    ;;                                   (append (cl-intersection gptel-tools value)
+    ;;                                           gptel--tools-removed)
+    ;;                                   #'equal)
+    ;;             gptel--tools-added (seq-uniq
+    ;;                                 (seq-difference gptel--tools-added value
+    ;;                                                 #'equal)
+    ;;                                 #'equal)))
+    (cond
+     ((memq value gptel--tools-added)
+      (setq gptel--tools-added (seq-uniq (delete value gptel--tools-added) #'equal)))
+     ((memq value gptel--tools-removed)
+      (setq gptel--tools-removed (seq-uniq (delete value gptel--tools-removed) #'equal)))
+     ((memq value gptel-tools)
+      (setq gptel--tools-removed (seq-uniq (append (list value) gptel--tools-removed) #'equal)))
+     (t
+      (setq gptel--tools-added (seq-uniq (append (list value) gptel--tools-added) #'equal)))))
+  (setq gptel--tools-active-category nil))
 
-(transient-define-infix gptel--infix-remove-all-tools ()
-  "Remove all tools being used."
-  :description "Remove all tools"
-  :class 'transient-lisp-variable
-  :prompt "Remove tools"
-  :format " %k %d"
-  :variable 'gptel--tools-added ;; doesn't really matter
-  :set-value (lambda (&rest _)
-               (interactive)
-               (setf gptel--tools-added nil
-                     gptel--tools-removed gptel-tools))
-  :key "tR"
-  :reader (lambda (&rest _) (interactive)))
+(transient-define-suffix gptel--tools-tool-select-all-switch ()
+  "Switch for a tool"
+  :class 'gptel-tools-callback-switch
+  :description "(Select all)"
+  :key "S"
+  (interactive)
+  (let ((value (oref (transient-suffix-object) value))
+        (all-added-tools (append gptel--tools-added gptel-tools)))
+    (if (length< (cl-intersection all-added-tools value) (length value))
+        (setq gptel--tools-added (seq-uniq
+                                  (append (seq-difference value gptel-tools #'equal)
+                                          gptel--tools-added)
+                                  #'equal)
+              gptel--tools-removed (seq-difference gptel--tools-removed value
+                                                    #'equal))
+      (setq gptel--tools-added (seq-difference gptel--tools-added value #'equal))))
+  (setq gptel--tools-active-category nil))
+
+(transient-define-suffix gptel--tools-tool-deselect-all-switch ()
+  "Switch for a tool"
+  :class 'gptel-tools-callback-switch
+  :description "(De-select all)"
+  :key "D"
+  (interactive)
+  (let ((value (oref (transient-suffix-object) value))
+        (all-added-tools (seq-difference
+                          (seq-uniq (append gptel--tools-added gptel-tools) #'equal)
+                          gptel--tools-removed
+                          #'equal)))
+    (if (length= (cl-intersection all-added-tools value) 0)
+        (setq gptel--tools-removed (seq-difference gptel--tools-removed value #'equal))
+      (setq gptel--tools-added (seq-difference gptel--tools-added value #'equal)
+            gptel--tools-removed (seq-uniq
+                                  (cl-intersection gptel-tools value)
+                                  #'equal))))
+  (setq gptel--tools-active-category nil))
+
+(transient-define-suffix gptel--tools-tool-clear-changes-all-switch ()
+  "Switch for a tool"
+  :class 'gptel-tools-callback-switch
+  :description "(Clear changes)"
+  :key "_"
+  (interactive)
+  (let ((value (oref (transient-suffix-object) value)))
+    (setq gptel--tools-added (seq-difference gptel--tools-added value #'equal)
+          gptel--tools-removed (seq-difference gptel--tools-removed value #'equal)))
+  (setq gptel--tools-active-category nil))
+
+(transient-define-suffix gptel--tools-go-back ()
+  "Go back a leve without setting a tool."
+  :class 'gptel-tools-callback-switch
+  :description "cancel"
+  :key "<"
+  (interactive)
+  (setq gptel--tools-active-category nil))
 
 (transient-define-infix gptel--infix-clear-tools-changes ()
   "Remove tools being updated."
@@ -1270,9 +1376,22 @@ Available behaviors are
                (interactive)
                (setf gptel--tools-added nil
                      gptel--tools-removed nil))
-  :key "tC"
+  :key "C"
   :reader (lambda (&rest _) (interactive)))
 
+(transient-define-infix gptel--infix-remove-all-tools ()
+  "Remove all tools being used."
+  :description "Remove all tools    "
+  :class 'transient-lisp-variable
+  :prompt "Remove tools"
+  :format " %k %d"
+  :variable 'gptel--tools-added ;; doesn't really matter
+  :set-value (lambda (&rest _)
+               (interactive)
+               (setf gptel--tools-added nil
+                     gptel--tools-removed gptel-tools))
+  :key "R"
+  :reader (lambda (&rest _) (interactive)))
 
 (transient-define-infix gptel--infix-use-tools ()
   "Whether LLM tool use with gptel is enabled.
