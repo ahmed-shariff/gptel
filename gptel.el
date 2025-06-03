@@ -3531,6 +3531,8 @@ Recognized keys are not limited to the above.  Any other key (like
 - TEMPERATURE to `gptel-temperature' and so on.
 See gptel's customization options for all available settings."
   (declare (indent 1))
+  (when (stringp name)
+    (setq name (intern name)))
   (if-let* ((p (assoc name gptel--known-presets)))
       (setcdr p keys)
     (setq gptel--known-presets          ;Add at end of presets for menu ordering
